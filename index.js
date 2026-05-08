@@ -1,35 +1,34 @@
 // ================================
 // YouTube Downloader API
+// Works on Vercel ✅
 // ================================
 
 const express = require('express');
 const cors = require('cors');
-const ytdlp = require('yt-dlp-exec');
-const path = require('path');
-const fs = require('fs');
+const ytdl = require('ytdl-core');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Create downloads folder
-const downloadFolder = path.join(__dirname, 'downloads');
-if (!fs.existsSync(downloadFolder)) {
-  fs.mkdirSync(downloadFolder);
-}
-
 // --------------------------------
-// ROUTE 1: Home - Check API works
+// ROUTE 1: Home
 // --------------------------------
 app.get('/', (req, res) => {
   res.json({
     status: '✅ YouTube Downloader API is Running!',
-    usage: {
-      getInfo:   'GET /info?url=YOUTUBE_URL',
-      download:  'GET /download?url=YOUTUBE_URL&quality=720p',
-      audio:     'GET /audio?url=YOUTUBE_URL'
+    routes: {
+      info:     'GET /info?url=YOUTUBE_URL',
+      download: 'GET /download?url=YOUTUBE_URL&quality=highestvideo',
+      audio:    'GET /audio?url=YOUTUBE_URL'
     },
-    qualityOptions: ['best', '720p', '480p', '360p', 'worst']
+    qualityOptions: [
+      'highestvideo',
+      'lowestvideo',
+      '720p',
+      '480p',
+      '360p'
+    ]
   });
 });
 
@@ -46,33 +45,45 @@ app.get('/info', async (req, res) => {
     });
   }
 
+  // Check if valid YouTube URL
+  if (!ytdl.validateURL(videoUrl)) {
+    return res.status(400).json({
+      error: '❌ Invalid YouTube URL',
+      tip: 'Make sure URL starts with https://youtube.com or https://youtu.be'
+    });
+  }
+
   try {
     console.log(`📡 Getting info: ${videoUrl}`);
 
-    const info = await ytdlp(videoUrl, {
-      dumpSingleJson: true,
-      noWarnings: true,
-      noCheckCertificates: true,
-      preferFreeFormats: true,
-    });
+    const info = await ytdl.getInfo(videoUrl);
+    const details = info.videoDetails;
 
     res.json({
       success: true,
-      title: info.title,
-      duration: info.duration + ' seconds',
-      uploader: info.uploader,
-      views: info.view_count,
-      likes: info.like_count,
-      thumbnail: info.thumbnail,
-      description: info.description
-        ? info.description.substring(0, 300) + '...'
+      title: details.title,
+      duration: details.lengthSeconds + ' seconds',
+      uploader: details.author.name,
+      views: details.viewCount,
+      thumbnail: details.thumbnails[details.thumbnails.length - 1].url,
+      description: details.description
+        ? details.description.substring(0, 300) + '...'
         : 'No description',
+      formats: info.formats.map(f => ({
+        quality: f.qualityLabel || f.audioQuality,
+        container: f.container,
+        hasVideo: f.hasVideo,
+        hasAudio: f.hasAudio,
+        contentLength: f.contentLength
+          ? (f.contentLength / 1024 / 1024).toFixed(2) + ' MB'
+          : 'unknown'
+      })).filter(f => f.quality)
     });
 
   } catch (err) {
     console.error('Info error:', err.message);
     res.status(500).json({
-      error: '❌ Failed to get info',
+      error: '❌ Failed to get video info',
       details: err.message
     });
   }
@@ -83,65 +94,52 @@ app.get('/info', async (req, res) => {
 // --------------------------------
 app.get('/download', async (req, res) => {
   const videoUrl = req.query.url;
-  const quality  = req.query.quality || 'best';
+  const quality  = req.query.quality || 'highestvideo';
 
   if (!videoUrl) {
     return res.status(400).json({
       error: '❌ No URL provided',
-      example: '/download?url=YOUTUBE_URL&quality=720p'
+      example: '/download?url=YOUTUBE_URL&quality=highestvideo'
+    });
+  }
+
+  if (!ytdl.validateURL(videoUrl)) {
+    return res.status(400).json({
+      error: '❌ Invalid YouTube URL'
     });
   }
 
   try {
-    console.log(`⬇️ Downloading: ${videoUrl} | Quality: ${quality}`);
+    console.log(`⬇️ Download started: ${videoUrl}`);
 
-    const timestamp  = Date.now();
-    const outputPath = path.join(
-      downloadFolder,
-      `video_${timestamp}.%(ext)s`
-    );
+    // Get video info for filename
+    const info    = await ytdl.getInfo(videoUrl);
+    const title   = info.videoDetails.title
+      .replace(/[^\w\s]/gi, '')  // remove special chars
+      .substring(0, 50);
 
-    // Pick format based on quality
-    let format = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best';
-    if (quality === '720p')  format = 'bestvideo[height<=720]+bestaudio/best[height<=720]';
-    if (quality === '480p')  format = 'bestvideo[height<=480]+bestaudio/best[height<=480]';
-    if (quality === '360p')  format = 'bestvideo[height<=360]+bestaudio/best[height<=360]';
-    if (quality === 'worst') format = 'worst';
+    // Set response headers so browser downloads the file
+    res.setHeader('Content-Disposition', `attachment; filename="${title}.mp4"`);
+    res.setHeader('Content-Type', 'video/mp4');
 
-    await ytdlp(videoUrl, {
-      format: format,
-      output: outputPath,
-      noWarnings: true,
-      noCheckCertificates: true,
-    });
-
-    // Find downloaded file
-    const files = fs.readdirSync(downloadFolder);
-    const file  = files.find(f => f.startsWith(`video_${timestamp}`));
-
-    if (!file) throw new Error('File not found after download');
-
-    const filePath = path.join(downloadFolder, file);
-
-    // Send file to user then delete it
-    res.download(filePath, file, () => {
-      fs.unlink(filePath, () => {
-        console.log(`🗑️ Deleted: ${file}`);
-      });
-    });
+    // Stream video directly to user
+    ytdl(videoUrl, {
+      quality: quality,
+      filter: 'videoandaudio',  // Must have both video and audio
+    }).pipe(res);
 
   } catch (err) {
     console.error('Download error:', err.message);
     res.status(500).json({
       error: '❌ Download failed',
       details: err.message,
-      tip: 'Make sure URL is valid and video is public'
+      tip: 'Try quality=lowestvideo for smaller files'
     });
   }
 });
 
 // --------------------------------
-// ROUTE 4: Download Audio Only
+// ROUTE 4: Audio Only (MP3/M4A)
 // --------------------------------
 app.get('/audio', async (req, res) => {
   const videoUrl = req.query.url;
@@ -153,35 +151,29 @@ app.get('/audio', async (req, res) => {
     });
   }
 
+  if (!ytdl.validateURL(videoUrl)) {
+    return res.status(400).json({
+      error: '❌ Invalid YouTube URL'
+    });
+  }
+
   try {
     console.log(`🎵 Audio download: ${videoUrl}`);
 
-    const timestamp  = Date.now();
-    const outputPath = path.join(
-      downloadFolder,
-      `audio_${timestamp}.%(ext)s`
-    );
+    const info  = await ytdl.getInfo(videoUrl);
+    const title = info.videoDetails.title
+      .replace(/[^\w\s]/gi, '')
+      .substring(0, 50);
 
-    await ytdlp(videoUrl, {
-      format: 'bestaudio[ext=m4a]/bestaudio',
-      output: outputPath,
-      noWarnings: true,
-      noCheckCertificates: true,
-      extractAudio: true,
-    });
+    // Set headers for audio download
+    res.setHeader('Content-Disposition', `attachment; filename="${title}.mp3"`);
+    res.setHeader('Content-Type', 'audio/mpeg');
 
-    const files = fs.readdirSync(downloadFolder);
-    const file  = files.find(f => f.startsWith(`audio_${timestamp}`));
-
-    if (!file) throw new Error('Audio file not found');
-
-    const filePath = path.join(downloadFolder, file);
-
-    res.download(filePath, file, () => {
-      fs.unlink(filePath, () => {
-        console.log(`🗑️ Deleted: ${file}`);
-      });
-    });
+    // Stream audio only
+    ytdl(videoUrl, {
+      quality: 'highestaudio',
+      filter: 'audioonly',
+    }).pipe(res);
 
   } catch (err) {
     console.error('Audio error:', err.message);
