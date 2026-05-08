@@ -1,193 +1,127 @@
-// ================================
-// YouTube Downloader API
-// Works on Vercel ✅
-// ================================
-
 const express = require('express');
 const cors = require('cors');
-const ytdl = require('ytdl-core');
+const { exec } = require('child_process');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --------------------------------
-// ROUTE 1: Home
-// --------------------------------
+const downloadFolder = path.join(__dirname, 'downloads');
+if (!fs.existsSync(downloadFolder)) {
+  fs.mkdirSync(downloadFolder);
+}
+
+// HOME
 app.get('/', (req, res) => {
   res.json({
-    status: '✅ YouTube Downloader API is Running!',
+    status: '✅ API Running on Railway!',
     routes: {
-      info:     'GET /info?url=YOUTUBE_URL',
-      download: 'GET /download?url=YOUTUBE_URL&quality=highestvideo',
-      audio:    'GET /audio?url=YOUTUBE_URL'
-    },
-    qualityOptions: [
-      'highestvideo',
-      'lowestvideo',
-      '720p',
-      '480p',
-      '360p'
-    ]
+      info:     '/info?url=YOUTUBE_URL',
+      download: '/download?url=YOUTUBE_URL&quality=best',
+      audio:    '/audio?url=YOUTUBE_URL'
+    }
   });
 });
 
-// --------------------------------
-// ROUTE 2: Get Video Info
-// --------------------------------
-app.get('/info', async (req, res) => {
+// INFO
+app.get('/info', (req, res) => {
   const videoUrl = req.query.url;
+  if (!videoUrl) return res.status(400).json({ error: 'Provide url parameter' });
 
-  if (!videoUrl) {
-    return res.status(400).json({
-      error: '❌ No URL provided',
-      example: '/info?url=https://youtube.com/watch?v=dQw4w9WgXcQ'
-    });
-  }
+  const cmd = `yt-dlp --dump-json --no-warnings "${videoUrl}"`;
 
-  // Check if valid YouTube URL
-  if (!ytdl.validateURL(videoUrl)) {
-    return res.status(400).json({
-      error: '❌ Invalid YouTube URL',
-      tip: 'Make sure URL starts with https://youtube.com or https://youtu.be'
-    });
-  }
-
-  try {
-    console.log(`📡 Getting info: ${videoUrl}`);
-
-    const info = await ytdl.getInfo(videoUrl);
-    const details = info.videoDetails;
-
-    res.json({
-      success: true,
-      title: details.title,
-      duration: details.lengthSeconds + ' seconds',
-      uploader: details.author.name,
-      views: details.viewCount,
-      thumbnail: details.thumbnails[details.thumbnails.length - 1].url,
-      description: details.description
-        ? details.description.substring(0, 300) + '...'
-        : 'No description',
-      formats: info.formats.map(f => ({
-        quality: f.qualityLabel || f.audioQuality,
-        container: f.container,
-        hasVideo: f.hasVideo,
-        hasAudio: f.hasAudio,
-        contentLength: f.contentLength
-          ? (f.contentLength / 1024 / 1024).toFixed(2) + ' MB'
-          : 'unknown'
-      })).filter(f => f.quality)
-    });
-
-  } catch (err) {
-    console.error('Info error:', err.message);
-    res.status(500).json({
-      error: '❌ Failed to get video info',
-      details: err.message
-    });
-  }
+  exec(cmd, (error, stdout, stderr) => {
+    if (error) {
+      return res.status(500).json({
+        error: '❌ Failed to get info',
+        details: stderr || error.message
+      });
+    }
+    try {
+      const info = JSON.parse(stdout);
+      res.json({
+        success: true,
+        title: info.title,
+        duration: info.duration + ' seconds',
+        uploader: info.uploader,
+        views: info.view_count,
+        thumbnail: info.thumbnail,
+        description: info.description
+          ? info.description.substring(0, 300)
+          : 'No description'
+      });
+    } catch (e) {
+      res.status(500).json({ error: 'Failed to parse info' });
+    }
+  });
 });
 
-// --------------------------------
-// ROUTE 3: Download Video
-// --------------------------------
-app.get('/download', async (req, res) => {
+// DOWNLOAD VIDEO
+app.get('/download', (req, res) => {
   const videoUrl = req.query.url;
-  const quality  = req.query.quality || 'highestvideo';
+  const quality  = req.query.quality || 'best';
+  if (!videoUrl) return res.status(400).json({ error: 'Provide url parameter' });
 
-  if (!videoUrl) {
-    return res.status(400).json({
-      error: '❌ No URL provided',
-      example: '/download?url=YOUTUBE_URL&quality=highestvideo'
+  const timestamp  = Date.now();
+  const outputPath = path.join(downloadFolder, `video_${timestamp}.%(ext)s`);
+
+  let format = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best';
+  if (quality === '720p')  format = 'bestvideo[height<=720]+bestaudio/best[height<=720]';
+  if (quality === '480p')  format = 'bestvideo[height<=480]+bestaudio/best[height<=480]';
+  if (quality === '360p')  format = 'bestvideo[height<=360]+bestaudio/best[height<=360]';
+  if (quality === 'worst') format = 'worst';
+
+  const cmd = `yt-dlp -f "${format}" -o "${outputPath}" --no-warnings "${videoUrl}"`;
+
+  exec(cmd, (error, stdout, stderr) => {
+    if (error) {
+      return res.status(500).json({
+        error: '❌ Download failed',
+        details: stderr || error.message
+      });
+    }
+
+    const files = fs.readdirSync(downloadFolder);
+    const file  = files.find(f => f.startsWith(`video_${timestamp}`));
+    if (!file) return res.status(500).json({ error: 'File not found' });
+
+    const filePath = path.join(downloadFolder, file);
+    res.download(filePath, file, () => {
+      fs.unlink(filePath, () => {});
     });
-  }
-
-  if (!ytdl.validateURL(videoUrl)) {
-    return res.status(400).json({
-      error: '❌ Invalid YouTube URL'
-    });
-  }
-
-  try {
-    console.log(`⬇️ Download started: ${videoUrl}`);
-
-    // Get video info for filename
-    const info    = await ytdl.getInfo(videoUrl);
-    const title   = info.videoDetails.title
-      .replace(/[^\w\s]/gi, '')  // remove special chars
-      .substring(0, 50);
-
-    // Set response headers so browser downloads the file
-    res.setHeader('Content-Disposition', `attachment; filename="${title}.mp4"`);
-    res.setHeader('Content-Type', 'video/mp4');
-
-    // Stream video directly to user
-    ytdl(videoUrl, {
-      quality: quality,
-      filter: 'videoandaudio',  // Must have both video and audio
-    }).pipe(res);
-
-  } catch (err) {
-    console.error('Download error:', err.message);
-    res.status(500).json({
-      error: '❌ Download failed',
-      details: err.message,
-      tip: 'Try quality=lowestvideo for smaller files'
-    });
-  }
+  });
 });
 
-// --------------------------------
-// ROUTE 4: Audio Only (MP3/M4A)
-// --------------------------------
-app.get('/audio', async (req, res) => {
+// AUDIO ONLY
+app.get('/audio', (req, res) => {
   const videoUrl = req.query.url;
+  if (!videoUrl) return res.status(400).json({ error: 'Provide url parameter' });
 
-  if (!videoUrl) {
-    return res.status(400).json({
-      error: '❌ No URL provided',
-      example: '/audio?url=YOUTUBE_URL'
+  const timestamp  = Date.now();
+  const outputPath = path.join(downloadFolder, `audio_${timestamp}.%(ext)s`);
+
+  const cmd = `yt-dlp -f "bestaudio[ext=m4a]/bestaudio" -o "${outputPath}" --no-warnings "${videoUrl}"`;
+
+  exec(cmd, (error, stdout, stderr) => {
+    if (error) {
+      return res.status(500).json({
+        error: '❌ Audio download failed',
+        details: stderr || error.message
+      });
+    }
+
+    const files = fs.readdirSync(downloadFolder);
+    const file  = files.find(f => f.startsWith(`audio_${timestamp}`));
+    if (!file) return res.status(500).json({ error: 'File not found' });
+
+    const filePath = path.join(downloadFolder, file);
+    res.download(filePath, file, () => {
+      fs.unlink(filePath, () => {});
     });
-  }
-
-  if (!ytdl.validateURL(videoUrl)) {
-    return res.status(400).json({
-      error: '❌ Invalid YouTube URL'
-    });
-  }
-
-  try {
-    console.log(`🎵 Audio download: ${videoUrl}`);
-
-    const info  = await ytdl.getInfo(videoUrl);
-    const title = info.videoDetails.title
-      .replace(/[^\w\s]/gi, '')
-      .substring(0, 50);
-
-    // Set headers for audio download
-    res.setHeader('Content-Disposition', `attachment; filename="${title}.mp3"`);
-    res.setHeader('Content-Type', 'audio/mpeg');
-
-    // Stream audio only
-    ytdl(videoUrl, {
-      quality: 'highestaudio',
-      filter: 'audioonly',
-    }).pipe(res);
-
-  } catch (err) {
-    console.error('Audio error:', err.message);
-    res.status(500).json({
-      error: '❌ Audio download failed',
-      details: err.message
-    });
-  }
+  });
 });
 
-// --------------------------------
-// Start Server
-// --------------------------------
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Server on port ${PORT}`));
